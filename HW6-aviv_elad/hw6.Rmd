@@ -1,0 +1,334 @@
+---
+title: "DSApps 2023 @ TAU: Assignment 6"
+author: "Giora Simchoni"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+subtitle: The Price is Right!
+---
+
+```{r child = "setup.Rmd"}
+```
+
+```{r, echo=FALSE}
+options(dplyr.summarise.inform=FALSE)
+```
+
+### Welcome
+
+Welcome to Assignment 6 in R!
+
+Remember:
+
+* You can play with the assignment in Playground mode, but:
+* Only your private Github repository assigned to you by the course admin will be cloned and graded (Submission mode, see instructions [here](https://github.com/DSApps-2023/Class_Slides/blob/master/Apps_of_DS_HW.pdf))
+* Like any other University assignment, your work should remain private
+* You need to `git clone` your private Github repository locally as explained [here](https://github.com/DSApps-2023/Class_Slides/blob/master/Apps_of_DS_HW.pdf)
+* You need to uncomment the starter code inside the chunk, replace the `### YOUR CODE HERE ###`, run the chunk and see that you're getting the expected result
+* Pay attention to what you're asked to do and the required output
+* For example, using a *different* function than the one you were specifically asked to use, will decrease your score (unless you amaze me)
+* Your notebook should run smoothly from start to end if someone presses in the RStudio toolbar Run --> Restart R and Run All Chunks
+* When you're done knit the entire notebook into a html file, this is the file that would be graded
+* You can add other files but do not delete any files
+* Commit your work and push to your private Github repository as explained [here](https://github.com/DSApps-2023/Class_Slides/blob/master/Apps_of_DS_HW.pdf)
+
+This assignment is due: 19/6 23:59
+
+### Packages
+
+These are the packages you will need. If you don't have them, you need to uncomment the `install.packages()` line and install them first (you can also just copy this command to the R console and do it there if you don't want all the output printed in this notebook).
+
+When you load the packages you may see different kinds of messages or warnings, skim them:
+
+```{r, message=FALSE, warning=FALSE}
+# install.packages(c("tidyverse", "tidymodels", "glmnet"))
+library(tidyverse)
+library(tidymodels)
+library(glmnet)
+```
+
+### The Price is Right Challenge
+
+This assignment we're having our very own mini Kaggle-like challenge!
+
+You! Are going! To predict the price of...
+
+<img src="images/shoes.jpg" style="width: 50%" />
+
+Women's Shoes!
+
+That's right. I have scraped [ebay](https://il.ebay.com/b/Womens-Heels/55793/bn_738266?LH_BIN=1&rt=nc&_pgn=1) for the price, title and some attributes of over 15K women's shoes (I did it with `rvest`, I doubt if you can call it ethical, so I won't share the script). But for ~1K of the shoes, the price is for me to know and for you to predict!
+
+You will have 7 attempts at submitting the predicted price of the hidden shoes, and whoever reaches the lowest RMSE - wins!
+
+Be sure to visit our [Leaderboard](https://dsapps-2023.github.io/Class_Slides/leaderboard.html) to see the best scores.
+
+### Basic Exploration
+
+There are two datasets in the data folder of this challenge:
+
+* `ebay_women_shoes_train.rds`: contains 14K pairs of shoes with `id`, `price` (in USD), `title`, `condition`, `brand`, `seller_notes`, `location` and many more attributes
+* `ebay_women_shoes_test.rds`: contains 1,044 pairs of shoes with all of the above except for `price` which is safely hidden with me
+
+```{r}
+shoes_train <- read_rds("data/ebay_women_shoes_train.rds")
+shoes_test <- read_rds("data/ebay_women_shoes_test.rds")
+
+dim(shoes_train)
+dim(shoes_test)
+```
+
+```{r}
+glimpse(shoes_train)
+```
+
+Three categories:
+
+```{r}
+shoes_train %>% count(category)
+```
+
+Four conditions, some `NA`:
+
+```{r}
+shoes_train %>% count(condition)
+```
+
+Top brands (of almost 3K...):
+
+```{r}
+shoes_train %>% count(brand, sort = TRUE)
+```
+
+The most expensive shoes:
+
+```{r}
+shoes_train %>% arrange(-price) %>% slice(1) %>% select(title, price)
+```
+
+The least expensive shoes:
+
+```{r}
+shoes_train %>% arrange(price) %>% slice(1) %>% select(title, price)
+```
+This doesn't look like shoes, but that's ebay for you.
+
+Let's see price by category. By the range of ~1,000 dollars, we'll need a log transformation:
+
+```{r}
+shoes_train %>%
+  ggplot(aes(category, log(price))) +
+  geom_jitter(color = "darkgreen", alpha = 0.2) +
+  geom_boxplot(color = "darkgreen", alpha = 0.8) +
+  theme_light()
+```
+
+Let's see this by condition:
+
+```{r}
+shoes_train %>%
+  ggplot(aes(condition, log(price))) +
+  geom_jitter(color = "darkred", alpha = 0.2) +
+  geom_boxplot(color = "darkred", alpha = 0.8) +
+  theme_light()
+```
+
+Finally see this by top brands:
+
+```{r}
+top_brands <- shoes_train %>%
+  count(brand, sort = TRUE) %>%
+  slice(1:10) %>% pull(brand)
+
+shoes_train %>%
+  filter(brand %in% top_brands) %>%
+  ggplot(aes(brand, log(price))) +
+  geom_jitter(color = "darkorchid", alpha = 0.2) +
+  geom_boxplot(color = "darkorchid", alpha = 0.8) +
+  theme_light()
+```
+
+### RMSE Baseline
+
+Let's do a basic split (you can later re-split the data as you like):
+```{r, message=FALSE, warning=FALSE}
+library(tidymodels)
+
+set.seed(42)
+shoes_split <- initial_split(shoes_train, prop = 0.8)
+shoes_train_tr <- training(shoes_split)
+shoes_train_te <- testing(shoes_split)
+```
+
+If we simply predict the training set mean...
+
+```{r}
+tr_price_mean <- mean(log(shoes_train_tr$price))
+
+rmse_vec(log(shoes_train_te$price), rep(tr_price_mean, nrow(shoes_train_te)))
+```
+
+If we simply predict the mean of each category...
+
+```{r}
+tr_price_mean_cat <- shoes_train_tr %>%
+  group_by(category) %>%
+  summarise(price_mean = mean(log(price)))
+
+pred_price_cat <- shoes_train_te %>%
+  inner_join(tr_price_mean_cat, by = "category") %>%
+  pull(price_mean)
+
+rmse_vec(log(shoes_train_te$price), pred_price_cat)
+```
+
+If we add in condition, where we treat `NA` as another category...
+
+```{r}
+shoes_train_tr <- shoes_train_tr %>%
+  mutate(condition = ifelse(is.na(condition), "NA", condition))
+
+shoes_train_te <- shoes_train_te %>%
+  mutate(condition = ifelse(is.na(condition), "NA", condition))
+
+tr_price_mean_cat_cond <- shoes_train_tr %>%
+  group_by(category, condition) %>%
+  summarise(price_mean = mean(log(price)))
+
+pred_price_cat_cond <- shoes_train_te %>%
+  inner_join(tr_price_mean_cat_cond, by = c("category", "condition")) %>%
+  pull(price_mean)
+
+rmse_vec(log(shoes_train_te$price), pred_price_cat_cond)
+```
+
+Finally if we add the top brands, where `NA` is a brand and all other brands are "other"...
+
+```{r}
+shoes_train_tr <- shoes_train_tr %>%
+  mutate(brand = ifelse(is.na(brand), "NA",
+                        ifelse(brand %in% top_brands, brand, "other")))
+
+shoes_train_te <- shoes_train_te %>%
+  mutate(brand = ifelse(is.na(brand), "NA",
+                        ifelse(brand %in% top_brands, brand, "other")))
+
+tr_price_mean_cat_cond_brand <- shoes_train_tr %>%
+  group_by(category, condition, brand) %>%
+  summarise(price_mean = mean(log(price)))
+
+pred_price_cat_cond_brand <- shoes_train_te %>%
+  left_join(tr_price_mean_cat_cond_brand, by = c("category", "condition", "brand")) %>%
+  pull(price_mean)
+
+rmse_vec(log(shoes_train_te$price), pred_price_cat_cond_brand)
+```
+
+Throwing in interaction between category and condition and is the product sent with free shipping, though almost all coefficients are "significant", doesn't really help RMSE:
+
+```{r}
+shoes_train_tr <- shoes_train_tr %>%
+  mutate(free_shipping = ifelse(is.na(free_shipping), 0, free_shipping))
+
+shoes_train_te <- shoes_train_te %>%
+  mutate(free_shipping = ifelse(is.na(free_shipping), 0, free_shipping))
+
+mod <- lm(log(price) ~ category * condition + brand + free_shipping, data = shoes_train_tr)
+
+pred_lm <- predict(mod, newdata = shoes_train_te)
+
+rmse_vec(log(shoes_train_te$price), pred_lm)
+
+```
+
+Throw in a visualization to see it makes sense:
+
+```{r}
+tibble(y_true = log(shoes_train_te$price), y_pred = pred_lm) %>%
+  ggplot(aes(y_true, y_pred)) +
+  geom_point(alpha = 0.5, color = "red") +
+  theme_bw()
+```
+
+### What you need to do
+
+##### (90 points)
+
+Build a sensible model, with your ML method of choice, to predict the `log(price)` of the 1,044 shoes in `shoes_test`.
+
+```{r}
+shoes_test_processed <- shoes_test %>%
+  mutate(brand = ifelse(is.na(brand), "NA",
+                        ifelse(brand %in% top_brands, brand, "other")),
+         free_shipping = ifelse(is.na(free_shipping), 0, free_shipping),
+         condition = ifelse(is.na(condition), "NA", condition))
+
+pred_model01 <- predict(mod, shoes_test_processed)
+```
+
+Once you do that, sink a CSV of your predictions titled e.g. `model01.csv`:
+
+```{r}
+shoes_test$price_pred <- pred_model01
+
+shoes_test %>%
+  select(id, price_pred) %>%
+  head()
+```
+
+```{r, eval=FALSE}
+shoes_test %>%
+  select(id, price_pred) %>%
+  write_csv("model01.csv")
+```
+
+Drop me a mail either by actually sending me a mail or opening an issue in your repo and assigning it to me, and wait to see your result on the [Leaderboard!](https://dsapps-2023.github.io/Class_Slides/leaderboard.html)
+
+**WARNING**: Be sure to name your models differently, otherwise your last result might run over your previous result, and you won't know which is which!
+
+At the end of the period you should have a single pdf page with a short bulleted summary of what you did.
+
+#### Further Dgeshim and Grading
+
+- ALL MUST REPRODUCE (R or Python - you should have a notebook I can run)
+- You may not under any circumstances overfit to the testing set (use your creativity for building a better model!)
+- You may not search the price of the shoes in the testing set
+- 10 points decrease for less than 3 attempts
+- This is a competition!
+  - 10 bonus points for winning MSE
+  - 5 bonus points for 2nd and 3rd places (even if 4th place reached only 0.0001 higher RMSE)
+  - 5 points decrease if you didn't decrease below 0.56, because, I mean, really.
+
+### Paper questions
+
+##### (10 points)
+
+Read Sections 1-3 from [Tree in Tree](https://proceedings.neurips.cc/paper/2021/hash/71f6278d140af599e06ad9bf1ba03cb0-Abstract.html), an adorable paper from NeurIPS 2021 by Bingzhao Zhu, Mahsa Shoaran (of course, you're welcome to read the whole thing!).
+
+Explain in your own words what is "Tree in Tree" and how it improves on CART:
+
+```{r}
+### YOUR ANSWER HERE ###
+```
+
+Look at the Figure 2 example. The authors demonstrate very clearly how TnT can reach a more simple model than CART on these data. Please describe what would MARS do! You can either:
+
+* hypothesize what it would do and explain shortly (but you better explain it well so I'm sure you got it)
+* actually run `earth::earth()` on these data (I created it for you below in `df`) and show me the model (but you better use the right params for `earth()` otherwise you'd be left with a stump :()
+
+```{r}
+df <- expand.grid(x1 = 1:3, x2 = 1:3)
+df$y <- c(1, 0, 1, 0, 0, 0, 1, 0, 1) #1: triangle, 0: circle
+
+# plot(df$x1, df$x2, pch = df$y + 1)
+```
+
+Isn't MARS amazing?
+
+Bonus 2 points: fit `rpart` on these data and show me that tree from Figure 2(b)!
+
+### Wrap up
+
+And that's it, you have shown you can build a sensible, reproducible model, on big not-so-trivial data, to predict the price of women's shoes. Good luck with the rest of the course!
