@@ -1,0 +1,331 @@
+---
+title: "DSApps 2023 @ TAU: Assignment 3"
+author: "Giora Simchoni"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+subtitle: The Tidyverse - Part C
+---
+
+```{r child = "setup.Rmd"}
+```
+
+### Welcome
+
+Welcome to Assignment 3 in R!
+
+Remember:
+
+* You can play with the assignment in Playground mode, but:
+* Only your private Github repository assigned to you by the course admin will be cloned and graded (Submission mode, see instructions [here](https://github.com/DSApps-2023/Class_Slides/blob/master/Apps_of_DS_HW.pdf))
+* Like any other University assignment, your work should remain private
+* You need to `git clone` your private Github repository locally as explained [here](https://github.com/DSApps-2023/Class_Slides/blob/main/Apps_of_DS_HW.pdf)
+* You need to uncomment the starter code inside the chunk, replace the `### YOUR CODE HERE ###`, run the chunk and see that you're getting the expected result
+* Pay attention to what you're asked to do and the required output
+* For example, using a *different* function than the one you were specifically asked to use, will decrease your score (unless you amaze me)
+* Your notebook should run smoothly from start to end if someone presses in the RStudio toolbar Run --> Restart R and Run All Chunks
+* When you're done knit the entire notebook into a html file, this is the file that would be graded
+* You can add other files but do not delete any files
+* Commit your work and push to your private Github repository as explained [here](https://github.com/DSApps-2023/Class_Slides/blob/main/Apps_of_DS_HW.pdf)
+
+This assignment is due: 8/5 23:59
+
+### Packages
+
+These are the packages you will need. If you don't have them, you need to uncomment the `install.packages()` line and install them first (you can also just copy this command to the R console and do it there if you don't want all the output printed in this notebook).
+
+When you load the packages you may see different kinds of messages or warnings, skim them:
+
+```{r}
+# install.packages(c("tidyverse", "glue", "tidymodels", "glmnet", "randomForest", "kernlab"))
+library(tidyverse)
+library(glue)
+library(tidymodels)
+library(glmnet)
+library(randomForest)
+library(kernlab)
+```
+
+### The `spotify_songs` Dataset
+
+The `spotify_songs` dataset was curated by [Kaylin Pavlik](https://www.kaylinpavlik.com/author/walkerkq/) from the [`spotifyr`](https://www.rcharlie.com/spotifyr/) package. It contains about 28K songs from 6 main genres (Electronic Dance Music, Latin, Pop, RnB, Rap, Rock), where each song has:
+
+* `track_name`
+* `track_artist`
+* `track_popularity`
+* `track_album_name`
+* `track_album_release_date`
+* `playlist_genre`
+
+As well as 12 audio features, such as `duration_ms`, `key`, `danceability`, `acousticness` and more. See full description at the [Tidy Tuesday repo](https://github.com/rfordatascience/tidytuesday/tree/master/data/2020/2020-01-21).
+
+```{r}
+spotify_songs <- read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-01-21/spotify_songs.csv')
+
+spotify_songs %>% count(playlist_genre)
+```
+**Attention**: Apparently each song can repeat a few times with a few genres!
+
+```{r}
+spotify_songs %>% count(track_id, sort = TRUE)
+```
+
+Sample a genre for each song, e.g. with:
+
+```{r}
+spotify_songs <- spotify_songs %>%
+  group_by(track_id) %>%
+  slice_sample(n = 1) %>%
+  ungroup()
+```
+
+
+### Tidy Modeling
+
+##### (40 points)
+
+Let's filter the songs to EDM and RnB songs only and let's recode the value "r&b" to "RnB" and "edm" to "EDM":
+
+```{r}
+spotify_songs2 <- spotify_songs %>%
+  filter(playlist_genre %in% c("edm", "r&b")) %>%
+  mutate(playlist_genre = recode(playlist_genre, "r&b" = "RnB", "edm" = "EDM"))
+```
+
+In this part of the assignment you will try to build a model to classify whether a song is of genre EDM or RnB, using the `tidymodels` approach.
+
+**Attention: the goal of this part of the assignment is not to reach the best accuracy, nor is it to demonstrate fancy feature engineering, but to show you can model a dataset in a tidy way**
+
+Start with only the 12 audio features as predictors. You can later feature engineer to death.
+
+```{r}
+predictors <- colnames(spotify_songs2)[c(12:23)]
+
+spotify_songs2 <- spotify_songs2 %>%
+  select(playlist_genre, all_of(predictors))
+```
+
+Split the data into `sptfy_tr` and `sptfy_te`, the training and testing datasets, 80% for training, 20% for testing.
+
+```{r}
+set.seed(2013)
+
+split_obj <- spotify_songs2 %>% 
+  initial_split(prop = 0.8)
+
+sptfy_tr <- training(split_obj)
+sptfy_te <- testing(split_obj)
+
+glue("train no. of rows: {nrow(sptfy_tr)}
+     test no. of rows: {nrow(sptfy_te)}")
+```
+
+Make a `recipe()` for modeling `playlist_genre` from all predictors. Including a scaling step for all numeric variables to have mean 0 and standard deviation 1, and don't forget to `prep()` everything on the *proper* dataset:
+
+```{r}
+sptfy_rec <- recipe(playlist_genre ~ .,data = sptfy_tr) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  prep(sptfy_tr)
+```
+
+Now `bake()` your recipe to produce the `sptfy_tr_ready` and `sptfy_te_ready` datasets:
+
+```{r}
+sptfy_tr_ready <- sptfy_rec %>% bake(sptfy_tr)
+sptfy_te_ready <- sptfy_rec %>% bake(sptfy_te)
+```
+
+Make sure the *proper* data is properly normalized.
+
+Now build a `parsnip` classification model with `logistic_reg()`, and set the engine for "glmnet". Build two classifiers, one with Ridge-like L2 penalty of 0.001, one with Lasso-like L1 penalty of 0.001, and fit them on the `sptfy_tr_ready` dataset:
+
+```{r}
+mod_l1 <- logistic_reg(mixture = 1, penalty = 0.001) %>% 
+  set_engine(engine = "glmnet") %>% 
+  fit(playlist_genre ~ ., data=sptfy_tr_ready)
+mod_l2 <- logistic_reg(mixture = 0, penalty = 0.001) %>% 
+  set_engine(engine = "glmnet") %>% 
+  fit(playlist_genre ~ ., data=sptfy_tr_ready)
+```
+
+Build a Random Forests `parsnip` classification model and set the engine to the "randomForest", with 100 trees, 4 variables at each split and minimum observations at leaf of 50:
+
+```{r}
+mod_rf <- rand_forest(mode = "classification", mtry = 4, trees = 100, min_n = 50) %>%
+  set_engine(engine = "randomForest") %>% 
+  fit(playlist_genre ~ ., data=sptfy_tr_ready)
+```
+
+Build a Kernel SVM `parsnip` classification model (look it up!) and set the engine to "kernlab". Use the `rbf_sigma` parameter of 0.1.
+
+```{r}
+mod_ksvm <- svm_rbf(mode = "classification", rbf_sigma = 0.1) %>%
+  set_engine("kernlab") %>% 
+  fit(playlist_genre ~ ., data=sptfy_tr_ready)
+```
+
+For all 4 models combined, use a similar approach to what we did in class, for creating a tidy `results_test` dataset which will hold for every observation in the `sptfy_te_ready` data the `method` used, the predicted `.pred_RnB` score of the song being of genre RnB and the `truth` label.
+
+```{r}
+results_test <- mod_l1 %>% 
+    predict(new_data = sptfy_te_ready, type = "prob") %>% 
+    mutate(truth = sptfy_te_ready$playlist_genre,method = "L1 Lasso") %>%
+  bind_rows(mod_l2 %>% 
+    predict(new_data = sptfy_te_ready, type = "prob") %>%
+    mutate(truth = sptfy_te_ready$playlist_genre,method = "L2 Ridge")) %>%
+  bind_rows(mod_rf %>%
+    predict(new_data = sptfy_te_ready, type = "prob") %>%
+    mutate(truth = sptfy_te_ready$playlist_genre,method = "RF")) %>%
+  bind_rows(mod_ksvm %>%
+    predict(new_data = sptfy_te_ready, type = "prob") %>%
+    mutate(truth = sptfy_te_ready$playlist_genre,method = "SVM"))
+results_test <- results_test %>%
+  select(method, .pred_RnB, truth)
+dim(results_test)
+head(results_test)
+```
+
+Finally use the `roc_auc` function from the `yardstick` package to extract the test AUC for each model. Use the score for "RnB" and be heavily inspired from what we did in class.
+
+```{r}
+results_test %>% 
+  group_by(method) %>% 
+  roc_auc(truth = truth, estimate = .pred_RnB, event_level = "second")
+```
+
+You should see AUCs of about 90% and above (does this surprise you?), if not perhaps you should review your process.
+
+### Paper questions
+
+##### (10 points)
+
+Read Sections 1-2 of Moscovich and Rosset [On the CV Bias](https://arxiv.org/abs/1901.08974) 2021 paper (first 5 pages, of course you're invited to read the whole thing!).
+
+Suppose we have variables (`x`, `y`) from which we have 100 pair observations:
+
+```{r}
+x <- rgamma(100, 1)
+y <- x + rnorm(100)
+```
+
+We want to predict new `y`s as more `x`s are coming in, using a simple linear model with no intercept, after scaling `x` and splitting the 100 pairs to 80% training and 20% testing sets. We estimate the quality of our estimator using MSE on the testing data.
+
+Here are four options to do this:
+
+```{r}
+f1 <- function(x, y) {
+  # scale x
+  x_mean <- mean(x)
+  x_sd <- sd(x)
+  x <- (x - x_mean) / x_sd
+  
+  # data splitting
+  x_train <- x[1:80]
+  x_test <- x[81:100]
+  y_train <- y[1:80]
+  y_test <- y[81:100]
+  
+  # model
+  lm_obj <- lm(y_train ~ 0 + x_train)
+  
+  # predict
+  y_pred <- predict(lm_obj, data.frame(x_train = x_test))
+  mse_test <- mean((y_pred - y_test)^2)
+  return(mse_test)
+}
+
+f2 <- function(x, y) {
+  # scale x
+  x_mean <- mean(x)
+  x_sd <- sd(x)
+  x <- (x - x_mean) / x_sd
+  
+  # data splitting
+  n <- length(x)
+  sample_train <- sample(1:n, floor(n * 0.8))
+  x_train <- x[sample_train]
+  x_test <- x[-sample_train]
+  y_train <- y[sample_train]
+  y_test <- y[-sample_train]
+  
+  # model
+  lm_obj <- lm(y_train ~ 0 + x_train)
+  
+  # predict
+  y_pred <- predict(lm_obj, data.frame(x_train = x_test))
+  mse_test <- mean((y_pred - y_test)^2)
+  return(mse_test)
+}
+
+f3 <- function(x, y) {
+  # data splitting
+  n <- length(x)
+  sample_train <- sample(1:n, floor(n * 0.8))
+  x_train <- x[sample_train]
+  x_test <- x[-sample_train]
+  y_train <- y[sample_train]
+  y_test <- y[-sample_train]
+  
+  # scale x
+  x_mean <- mean(x_train)
+  x_sd <- sd(x_train)
+  x_train <- (x_train - x_mean) / x_sd
+  x_test <- (x_test - x_mean) / x_sd
+  
+  # model
+  lm_obj <- lm(y_train ~ 0 + x_train)
+  
+  # predict
+  y_pred <- predict(lm_obj, data.frame(x_train = x_test))
+  mse_test <- mean((y_pred - y_test)^2)
+  return(mse_test)
+}
+
+f4 <- function(x, y) {
+  # data splitting
+  n <- length(x)
+  sample_train <- sample(1:n, floor(n * 0.8))
+  x_train <- x[sample_train]
+  x_test <- x[-sample_train]
+  y_train <- y[sample_train]
+  y_test <- y[-sample_train]
+  
+  # scale x
+  x_mean <- mean(x_train)
+  x_sd <- sd(x_train)
+  x_train <- (x_train - x_mean) / x_sd
+  x_mean <- mean(x_test)
+  x_sd <- sd(x_test)
+  x_test <- (x_test - x_mean) / x_sd
+  
+  # model
+  lm_obj <- lm(y_train ~ 0 + x_train)
+  
+  # predict
+  y_pred <- predict(lm_obj, data.frame(x_train = x_test))
+  mse_test <- mean((y_pred - y_test)^2)
+  return(mse_test)
+}
+
+```
+
+* Which is the best option giving the most realistic test MSE according to Moscovich and Rosset? Explain in short.
+ - The best option is “f3”, because it follows the principle of first splitting the data to training and test sets, and defining the standardizing transformation only with the training set, and applying the same transformation to the test set as well.
+
+* Which is the option they are most concerned with? Explain in short.
+ - The option they are most concerened with is “f1”, because of 2 reasons:
+      - the whole dataset is used for defining the standardizing transformation, causing data leakage.
+      - splitting of the set to train and test sets is not random, thus potentially introducing bias from the distribution          to the predictor.
+ 
+* Explain in short what's wrong with the other two options.
+ -  “f2” uses the entire dataset when defining the standardizing transformation, causing data leakage.
+ -  “f4” defines a different standardizing transformation for the test and training sets.
+
+* Bonus 2 points: Under which assumptions/circumstances are the three options other than the best not *that* bad? (hint: you might like to read further)
+ - Maybe if we already sample from a standardized distribution.
+
+### Wrap up
+
+And that's it, you have shown you can use `tidymodels` to predict the genre of a song, the tidy way. Feel free to add features and properly tune the models and amaze me with higher AUCs. Good luck with the rest of the course!
